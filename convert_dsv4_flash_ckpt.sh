@@ -21,7 +21,7 @@ export NVTE_FUSED_ATTN="${NVTE_FUSED_ATTN:-0}"
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-32}"
 
 HF_CKPT_PATH="/root/paddlejob/share-storage/gpfs/system-public/huangjiyi/Models/DeepSeek-V4-Flash"
-MEGATRON_CKPT_PATH="./ckpts/dsv4_flash_megatron_ckpt"
+MEGATRON_CKPT_PATH="./ckpts/dsv4_flash_hf2megatron_pp4ep8_ckpt"
 
 mkdir -p "${MEGATRON_CKPT_PATH}"
 
