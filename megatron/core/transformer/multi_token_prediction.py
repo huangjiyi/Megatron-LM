@@ -1,6 +1,7 @@
 # Copyright (c) 2025-2026, NVIDIA CORPORATION. All rights reserved.
 from __future__ import annotations
 
+import os
 import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -56,6 +57,18 @@ SUPPORTED_ATTN_MASK = [
     AttnMaskType.no_mask,
     AttnMaskType.padding_causal,
 ]
+
+
+def _dsv4_mtp_loss_log_enabled() -> bool:
+    return os.environ.get('LOG_LOSS_MD5', '0') == '1'
+
+
+def _dsv4_mtp_tensor_md5(tensor: Tensor, dtype: torch.dtype = torch.float32) -> str:
+    import hashlib
+
+    tensor_for_md5 = tensor.detach().to(dtype=dtype).cpu().contiguous()
+    return hashlib.md5(tensor_for_md5.numpy().tobytes()).hexdigest()
+
 
 if HAVE_TE:
     from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
@@ -717,6 +730,35 @@ def process_mtp_loss(
             if scale_logits_fn is not None:
                 mtp_logits = scale_logits_fn(mtp_logits)
             mtp_loss = compute_language_model_loss(mtp_labels, mtp_logits)
+            if _dsv4_mtp_loss_log_enabled():
+                mtp_loss_for_log = mtp_loss.detach().float()
+                loss_mask_for_log = loss_mask.detach().float()
+                loss_sum_tensor_for_log = torch.sum(
+                    mtp_loss_for_log * loss_mask_for_log
+                ).detach().float().reshape(1)
+                valid_count_tensor_for_log = loss_mask_for_log.sum().detach().float().reshape(1)
+                valid_count_for_log = float(valid_count_tensor_for_log.item())
+                final_loss_tensor_for_log = (
+                    loss_sum_tensor_for_log / valid_count_tensor_for_log
+                    if valid_count_for_log
+                    else torch.full(
+                        (1,),
+                        float('nan'),
+                        dtype=torch.float32,
+                        device=mtp_loss_for_log.device,
+                    )
+                )
+                rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+                if rank == 0:
+                    print(
+                        f"[MTP_LOSS_PATH_MD5] rank={rank} mtp{mtp_layer_number + 1}.loss_sum="
+                        f"{float(loss_sum_tensor_for_log.item()):.20f} "
+                        f"loss_sum_md5={_dsv4_mtp_tensor_md5(loss_sum_tensor_for_log)} "
+                        f"final_loss={float(final_loss_tensor_for_log.item()):.20f} "
+                        f"final_loss_md5={_dsv4_mtp_tensor_md5(final_loss_tensor_for_log)} "
+                        f"valid_tokens={valid_count_for_log:.1f}",
+                        flush=True,
+                    )
         mtp_loss = loss_mask * mtp_loss
         if is_training:
             # Safe divide without sync: mask numerator when num_tokens==0, divide by clamp(min=1)
