@@ -69,6 +69,95 @@ except ImportError:
 
 stimer = StragglerDetector()
 
+_FIXED_BATCH_TOKENS = None
+_FIXED_BATCH_LOGGED = False
+_LOSS_PATH_LOGGED = False
+
+
+def _load_fixed_batch_tokens(args):
+    """Load an env-gated fixed training batch for cross-framework alignment."""
+    global _FIXED_BATCH_TOKENS
+
+    if _FIXED_BATCH_TOKENS is not None:
+        return _FIXED_BATCH_TOKENS
+
+    fixed_tokens_path = os.environ.get('DSV4_MEGATRON_FIXED_TOKENS')
+    if not fixed_tokens_path:
+        return None
+
+    with open(fixed_tokens_path, 'r', encoding='utf-8') as f:
+        payload = json.load(f)
+    tokens = payload['tokens'] if isinstance(payload, dict) else payload
+    tokens = [int(token) for token in tokens]
+
+    expected_token_count = args.seq_length + 1
+    if len(tokens) != expected_token_count:
+        raise ValueError(
+            f"DSV4_MEGATRON_FIXED_TOKENS expects {expected_token_count} tokens "
+            f"for seq_length={args.seq_length}, got {len(tokens)} from {fixed_tokens_path}"
+        )
+
+    _FIXED_BATCH_TOKENS = tokens
+    print_rank_0(f"[DSV4_MEGATRON_FIXED_TOKENS] using fixed token batch from {fixed_tokens_path}")
+    return _FIXED_BATCH_TOKENS
+
+
+def _tensor_md5(tensor: torch.Tensor, dtype: torch.dtype | None = None) -> str:
+    import hashlib
+
+    if dtype is not None:
+        tensor = tensor.to(dtype=dtype)
+    return hashlib.md5(tensor.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+
+
+def _override_batch_with_fixed_tokens(batch, args):
+    """Replace dataloader output with a deterministic fixed batch when requested."""
+    global _FIXED_BATCH_LOGGED
+
+    fixed_tokens = _load_fixed_batch_tokens(args)
+    if fixed_tokens is None:
+        return batch
+
+    device = torch.cuda.current_device()
+    fixed = torch.tensor(fixed_tokens, dtype=torch.long, device=device)
+    tokens = fixed[:-1].unsqueeze(0).expand(args.micro_batch_size, -1).contiguous()
+    labels = fixed[1:].unsqueeze(0).expand(args.micro_batch_size, -1).contiguous()
+    loss_mask = torch.ones(tokens.shape, dtype=torch.float32, device=device)
+    position_ids = (
+        torch.arange(args.seq_length, dtype=torch.long, device=device)
+        .unsqueeze(0)
+        .expand(args.micro_batch_size, -1)
+        .contiguous()
+    )
+
+    batch['tokens'] = tokens
+    batch['labels'] = labels
+    batch['loss_mask'] = loss_mask
+    batch['position_ids'] = position_ids
+    batch['attention_mask'] = None
+    batch['cu_seqlens'] = None
+    batch['cu_seqlens_padded'] = None
+    batch['max_seqlen'] = None
+    batch['local_cp_size'] = None
+
+    if not _FIXED_BATCH_LOGGED and (
+        os.environ.get('LOG_DATA_MD5', '0') == '1' or os.environ.get('LOG_LOSS_MD5', '0') == '1'
+    ):
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        print(
+            f"[DATA_PATH_MD5] rank={rank} input_ids shape={list(tokens.shape)} "
+            f"md5={_tensor_md5(tokens, torch.int64)}",
+            flush=True,
+        )
+        print(
+            f"[DATA_PATH_MD5] rank={rank} labels shape={list(labels.shape)} "
+            f"md5={_tensor_md5(labels, torch.int64)}",
+            flush=True,
+        )
+        _FIXED_BATCH_LOGGED = True
+
+    return batch
+
 
 def get_batch(data_iterator, vp_stage: Optional[int] = None):
     """Generate a batch.
@@ -146,6 +235,7 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
         data_iterator,
         mtp_on_this_rank=mtp_on_this_rank(config, ignore_virtual=False, vp_stage=vp_stage),
     )
+    batch = _override_batch_with_fixed_tokens(batch, args)
 
     cu_seqlens = batch.pop('cu_seqlens', None)
     cu_seqlens_padded = batch.pop('cu_seqlens_padded', None)
@@ -220,6 +310,31 @@ def loss_func(
 
         num_tokens = loss_mask.sum().clone().detach().to(torch.int)
         report = {'lm loss': torch.cat([loss.clone().detach().view(1), num_tokens.view(1)])}
+
+    global _LOSS_PATH_LOGGED
+    log_loss_every_step = os.environ.get('LOG_LOSS_MD5_EVERY_STEP', '0') == '1'
+    if (log_loss_every_step or not _LOSS_PATH_LOGGED) and os.environ.get('LOG_LOSS_MD5', '0') == '1':
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        flat_losses = output_tensor.detach().float().reshape(-1)
+        flat_mask = loss_mask.detach().float().reshape(-1)
+        valid_count_tensor = flat_mask.sum().detach().float().reshape(1)
+        valid_count = float(valid_count_tensor.item())
+        loss_sum_tensor = torch.sum(flat_losses * flat_mask).detach().float().reshape(1)
+        loss_sum_val = float(loss_sum_tensor.item())
+        final_loss_tensor = (
+            loss_sum_tensor / valid_count_tensor
+            if valid_count
+            else torch.full((1,), float('nan'), dtype=torch.float32, device=flat_losses.device)
+        )
+        final_loss = float(final_loss_tensor.item())
+        print(
+            f"[LOSS_PATH_MD5] rank={rank} loss_sum={loss_sum_val:.20f} "
+            f"loss_sum_md5={_tensor_md5(loss_sum_tensor, torch.float32)} "
+            f"final_loss={final_loss:.20f} "
+            f"final_loss_md5={_tensor_md5(final_loss_tensor, torch.float32)}",
+            flush=True,
+        )
+        _LOSS_PATH_LOGGED = True
 
     # Check individual rank losses are not NaN prior to DP all-reduce.
     rerun_state_machine = get_rerun_state_machine()
