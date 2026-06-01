@@ -639,7 +639,7 @@ class TENorm:
 
         if (
             config.normalization == "RMSNorm"
-            and os.environ.get("DSV4_USE_TORCH_RMSNORM", "0") == "1"
+            and os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
         ):
             if config.layernorm_zero_centered_gamma:
                 raise ValueError("torch.nn.RMSNorm does not support zero-centered gamma")

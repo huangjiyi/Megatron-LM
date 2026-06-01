@@ -57,7 +57,7 @@ else:
 
 
 def _dsv4_megatron_moe_fp32_accum_enabled() -> bool:
-    return os.environ.get("DSV4_MEGATRON_MOE_FP32_ACCUM", "0") == "1"
+    return os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
 
 
 def switch_load_balancing_loss_func(
@@ -1371,7 +1371,7 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         use_te_router_gemm = (
             te_general_gemm is not None
             and router_dtype != torch.float64
-            and os.environ.get("DSV4_DISABLE_TE_ROUTER_GEMM", "0") != "1"
+            and os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") != "1"
         )
         if use_te_router_gemm:
             output = te_general_gemm(weight, inp, router_dtype, layout="TN", bias=bias)
@@ -1409,7 +1409,7 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         use_te_router_gemm = (
             te_general_gemm is not None
             and ctx.router_dtype != torch.float64
-            and os.environ.get("DSV4_DISABLE_TE_ROUTER_GEMM", "0") != "1"
+            and os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") != "1"
         )
         if use_te_router_gemm:
             grad_input = te_general_gemm(
