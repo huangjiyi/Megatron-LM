@@ -28,12 +28,12 @@ export NVTE_CPU_OFFLOAD_V1=0
 export NVTE_FUSED_ATTN="${NVTE_FUSED_ATTN:-0}"
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-32}"
 
-export DSV4_MEGATRON_FIXED_TOKENS="/root/paddlejob/share-storage/gpfs/system-public/huangjiyi/dsv4-flash-workspace/alignment_data/real_tokens_seq4097.json"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export DSV4_MEGATRON_FIXED_TOKENS="${SCRIPT_DIR}/alignment_data/real_tokens_seq4097.json"
 export LOG_DATA_MD5="${LOG_DATA_MD5:-1}"
 export LOG_LOSS_MD5="${LOG_LOSS_MD5:-1}"
 export DSV4_DISABLE_MEGATRON_JIT_FUSER="${DSV4_DISABLE_MEGATRON_JIT_FUSER:-1}"
-export DSV4_DISABLE_TE_ROUTER_GEMM="${DSV4_DISABLE_TE_ROUTER_GEMM:-1}"
-export DSV4_USE_TORCH_RMSNORM="${DSV4_USE_TORCH_RMSNORM:-1}"
+export FLAGS_use_accuracy_compatible_kernel="${FLAGS_use_accuracy_compatible_kernel:-1}"
 
 mkdir -p "${OUTPUT_DIR}/tensorboard" "${DATA_CACHE_PATH}" "${LOG_DIR}"
 

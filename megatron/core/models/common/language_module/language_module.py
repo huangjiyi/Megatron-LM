@@ -154,7 +154,11 @@ class LanguageModule(MegatronModule):
         """
         # [b s] => [s b]
         labels = labels.transpose(0, 1).contiguous()
-        if parallel_state.get_tensor_model_parallel_world_size() == 1 and logits.ndim == 3:
+        if (
+            os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+            and parallel_state.get_tensor_model_parallel_world_size() == 1
+            and logits.ndim == 3
+        ):
             loss = F.cross_entropy(
                 logits.float().reshape(-1, logits.shape[-1]),
                 labels.reshape(-1),
