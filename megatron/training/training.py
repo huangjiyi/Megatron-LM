@@ -2631,6 +2631,14 @@ def training_log(
                 )
                 if avg >= 0.0:
                     log_string += ' {}: {:.6E} |'.format(key, avg)
+                # Log MD5 of post-DP-allreduce loss so it can be diff'd
+                # against PaddleFleet trainer's loss_md5 output.
+                if os.environ.get('LOG_LOSS_MD5', '0') == '1':
+                    import hashlib
+
+                    avg_t = torch.tensor([avg], dtype=torch.float32)
+                    avg_md5 = hashlib.md5(avg_t.numpy().tobytes()).hexdigest()
+                    log_string += ' {}_md5: {} |'.format(key, avg_md5)
                 if should_reset:
                     total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device='cuda')
         log_string += f' loss scale: {loss_scale:.1f} |'

@@ -29,7 +29,7 @@ export NVTE_FUSED_ATTN="${NVTE_FUSED_ATTN:-0}"
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-32}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export DSV4_MEGATRON_FIXED_TOKENS="${SCRIPT_DIR}/alignment_data/real_tokens_seq4097.json"
+#export DSV4_MEGATRON_FIXED_TOKENS="${SCRIPT_DIR}/alignment_data/real_tokens_seq4097.json"
 export LOG_DATA_MD5="${LOG_DATA_MD5:-1}"
 export LOG_LOSS_MD5="${LOG_LOSS_MD5:-1}"
 export DSV4_DISABLE_MEGATRON_JIT_FUSER="${DSV4_DISABLE_MEGATRON_JIT_FUSER:-1}"
