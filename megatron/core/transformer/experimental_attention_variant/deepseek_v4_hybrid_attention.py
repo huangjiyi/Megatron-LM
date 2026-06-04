@@ -556,7 +556,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         # q_compressed: [s, b, q_lora_rank]
         q_compressed, _ = self.linear_q_down_proj(hidden_states)
 
-        kv_compressed = hidden_states
+        kv_compressed = hidden_states if key_value_states is None else key_value_states
         k_pos_emb = None
 
         if packed_seq_params is not None:

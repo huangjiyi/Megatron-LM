@@ -1,5 +1,6 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
+import os
 from typing import List, Optional
 
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
@@ -180,12 +181,18 @@ def get_dsv4_hybrid_module_spec_for_backend(
         ),
     )
 
+    q_up_linear = backend.column_parallel_linear()
+    if os.getenv("DSV4_MEGATRON_Q_UP_LOCAL_LINEAR", "0") == "1":
+        from megatron.core.tensor_parallel.layers import ColumnParallelLinear
+
+        q_up_linear = ColumnParallelLinear
+
     attention = ModuleSpec(
         module=DSv4HybridSelfAttention,
         params={"attn_mask_type": AttnMaskType.causal},
         submodules=DSv4HybridSelfAttentionSubmodules(
             linear_q_down_proj=backend.linear(),
-            linear_q_up_proj=backend.column_parallel_linear(),
+            linear_q_up_proj=q_up_linear,
             linear_kv_proj=backend.column_parallel_linear(),
             core_attention=core_attention,
             linear_proj=backend.row_parallel_linear(),

@@ -295,7 +295,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         else:
             masked_input = input_
         # Get the embeddings.
-        if self.deterministic_mode:
+        if self.deterministic_mode or os.getenv("DSV4_EMBEDDING_INDEX_BACKWARD", "0") == "1":
             output_parallel = self.weight[masked_input]
         else:
             # F.embedding currently has a non-deterministic backward function

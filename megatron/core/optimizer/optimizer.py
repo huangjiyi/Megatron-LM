@@ -53,8 +53,6 @@ from .grad_scaler import MegatronGradScaler
 from .optimizer_config import OptimizerConfig
 
 logger = getLogger(__name__)
-
-
 def _zero_grad_group_helper(
     group: List[torch.nn.Parameter], set_to_none: bool, use_decoupled_grad: bool = False
 ):
@@ -557,7 +555,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         if timers is not None:
             timers('optimizer-copy-to-main-grad', log_level=1).start(
                 barrier=self.config.barrier_with_L1_time
-            )
+        )
         if not self.is_stub_optimizer:
             self._copy_model_grads_to_main_grads()
         if timers is not None:
@@ -594,7 +592,11 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
                 barrier=self.config.barrier_with_L1_time
             )
         if not self.is_stub_optimizer:
+            if hasattr(self, '_capture_gate_manual_adamw_states'):
+                self._capture_gate_manual_adamw_states()
             self.optimizer.step()
+            if hasattr(self, '_apply_gate_manual_adamw_states'):
+                self._apply_gate_manual_adamw_states()
         if timers is not None:
             timers('optimizer-inner-step').stop()
 
@@ -1400,7 +1402,12 @@ class ChainedOptimizer(MegatronOptimizer):
         if found_inf_flag:
             return False, None, None
 
-        grad_norm = self.get_grad_norm()
+        should_clip = any(
+            not (hasattr(optimizer, 'is_stub_optimizer') and optimizer.is_stub_optimizer)
+            and optimizer.config.clip_grad > 0.0
+            for optimizer in self.chained_optimizers
+        )
+        grad_norm = self.get_grad_norm() if should_clip else 0.0
 
         # Clip gradients.
         for optimizer in self.chained_optimizers:
