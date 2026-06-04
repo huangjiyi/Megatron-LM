@@ -75,31 +75,65 @@ _LOSS_PATH_LOGGED = False
 
 
 def _load_fixed_batch_tokens(args):
-    """Load an env-gated fixed training batch for cross-framework alignment."""
+    """Load dumped numpy batch (tokens + labels) for cross-framework alignment.
+
+    Reads from the directory specified by LOAD_FIXED_DATA_PATH env var,
+    matching files produced by _dump_batch_data.
+    """
     global _FIXED_BATCH_TOKENS
 
     if _FIXED_BATCH_TOKENS is not None:
         return _FIXED_BATCH_TOKENS
 
-    fixed_tokens_path = os.environ.get('DSV4_MEGATRON_FIXED_TOKENS')
+    fixed_tokens_path = os.environ.get('LOAD_FIXED_DATA_PATH')
     if not fixed_tokens_path:
         return None
 
-    with open(fixed_tokens_path, 'r', encoding='utf-8') as f:
-        payload = json.load(f)
-    tokens = payload['tokens'] if isinstance(payload, dict) else payload
-    tokens = [int(token) for token in tokens]
+    import numpy as np
 
-    expected_token_count = args.seq_length + 1
-    if len(tokens) != expected_token_count:
-        raise ValueError(
-            f"DSV4_MEGATRON_FIXED_TOKENS expects {expected_token_count} tokens "
-            f"for seq_length={args.seq_length}, got {len(tokens)} from {fixed_tokens_path}"
-        )
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    global_step = getattr(args, 'curr_iteration', 0)
+    seq_len = args.seq_length
+    suffix = f"step{global_step}_rank{rank}_seq{seq_len}.npy"
+    tokens_file = os.path.join(fixed_tokens_path, f"tokens_{suffix}")
+    labels_file = os.path.join(fixed_tokens_path, f"labels_{suffix}")
 
-    _FIXED_BATCH_TOKENS = tokens
-    print_rank_0(f"[DSV4_MEGATRON_FIXED_TOKENS] using fixed token batch from {fixed_tokens_path}")
+    if not os.path.exists(tokens_file):
+        print_rank_0(f"[LOAD_FIXED_DATA_PATH] file not found: {tokens_file}")
+        return None
+
+    tokens = np.load(tokens_file)
+    labels = np.load(labels_file)
+    _FIXED_BATCH_TOKENS = (tokens, labels)
+    print_rank_0(f"[LOAD_FIXED_DATA_PATH] loaded {suffix} shape={list(tokens.shape)}")
     return _FIXED_BATCH_TOKENS
+
+
+def _dump_batch_data(batch, args):
+    """Dump raw batch tokens and labels to numpy files for cross-framework alignment.
+
+    Controlled by env var DUMP_DATA_PATH. Files are saved as:
+        <DUMP_DATA_PATH>/tokens_step{global_step}_rank{rank}_seq{seq_len}.npy
+        <DUMP_DATA_PATH>/labels_step{global_step}_rank{rank}_seq{seq_len}.npy
+    """
+    dump_path = os.environ.get('DUMP_DATA_PATH')
+    if not dump_path:
+        return
+
+    import numpy as np
+
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    global_step = getattr(args, 'curr_iteration', 0)
+    seq_len = args.seq_length
+    torch.cuda.synchronize()
+    tokens_np = batch['tokens'].detach().cpu().numpy()
+    labels_np = batch['labels'].detach().cpu().numpy()
+
+    os.makedirs(dump_path, exist_ok=True)
+    suffix = f"step{global_step}_rank{rank}_seq{seq_len}.npy"
+    np.save(os.path.join(dump_path, f"tokens_{suffix}"), tokens_np)
+    np.save(os.path.join(dump_path, f"labels_{suffix}"), labels_np)
+    print_rank_0(f"[DUMP_DATA_PATH] saved tokens_{suffix} and labels_{suffix}")
 
 
 def _tensor_md5(tensor: torch.Tensor, dtype: torch.dtype | None = None) -> str:
@@ -111,22 +145,22 @@ def _tensor_md5(tensor: torch.Tensor, dtype: torch.dtype | None = None) -> str:
 
 
 def _override_batch_with_fixed_tokens(batch, args):
-    """Replace dataloader output with a deterministic fixed batch when requested."""
+    """Replace dataloader output with a dumped numpy batch for cross-framework alignment."""
     global _FIXED_BATCH_LOGGED
 
-    fixed_tokens = _load_fixed_batch_tokens(args)
-    if fixed_tokens is None:
+    fixed_data = _load_fixed_batch_tokens(args)
+    if fixed_data is None:
         return batch
 
     device = torch.cuda.current_device()
-    fixed = torch.tensor(fixed_tokens, dtype=torch.long, device=device)
-    tokens = fixed[:-1].unsqueeze(0).expand(args.micro_batch_size, -1).contiguous()
-    labels = fixed[1:].unsqueeze(0).expand(args.micro_batch_size, -1).contiguous()
+    tokens_np, labels_np = fixed_data
+    tokens = torch.tensor(tokens_np, dtype=torch.long, device=device)
+    labels = torch.tensor(labels_np, dtype=torch.long, device=device)
     loss_mask = torch.ones(tokens.shape, dtype=torch.float32, device=device)
     position_ids = (
-        torch.arange(args.seq_length, dtype=torch.long, device=device)
+        torch.arange(tokens.shape[1], dtype=torch.long, device=device)
         .unsqueeze(0)
-        .expand(args.micro_batch_size, -1)
+        .expand(tokens.shape[0], -1)
         .contiguous()
     )
 
@@ -236,6 +270,7 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
         mtp_on_this_rank=mtp_on_this_rank(config, ignore_virtual=False, vp_stage=vp_stage),
     )
     batch = _override_batch_with_fixed_tokens(batch, args)
+    _dump_batch_data(batch, args)
 
     cu_seqlens = batch.pop('cu_seqlens', None)
     cu_seqlens_padded = batch.pop('cu_seqlens_padded', None)
