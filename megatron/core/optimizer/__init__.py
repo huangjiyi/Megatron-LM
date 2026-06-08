@@ -553,8 +553,11 @@ def _get_megatron_optimizer_based_on_param_groups(
 
             # set Adam class and weight decay mode depending
             # on source of optimizer (Torch or TE/Apex)
-            if USING_PYTORCH_OPTIMIZER:
-                adam_cls = torch.optim.AdamW if config.decoupled_weight_decay else torch.optim.Adam
+            if config.decoupled_weight_decay:
+                kwargs["fused"] = True
+                adam_cls = torch.optim.AdamW
+            elif USING_PYTORCH_OPTIMIZER:
+                adam_cls = torch.optim.Adam
             else:
                 kwargs["adam_w_mode"] = config.decoupled_weight_decay
                 adam_cls = Adam

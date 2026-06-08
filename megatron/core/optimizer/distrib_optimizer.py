@@ -2690,7 +2690,30 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     assert param_range.size == shard_main_param.nelement()
 
                     model_grad = model_param.main_grad
-                    shard_model_grad = model_grad.view(-1)[param_range.start : param_range.end]
+                    gate_wgrad = getattr(model_param, "_run_torch_gate_fp32_wgrad", None)
+                    param_name = self._param_name(model_param)
+                    use_gate_wgrad = gate_wgrad is not None and (
+                        "mlp.gate.weight" in param_name
+                        or "mlp.router.weight" in param_name
+                        or "block_sparse_moe.gate.weight" in param_name
+                        or param_name.endswith("router.weight")
+                    )
+                    if use_gate_wgrad:
+                        from megatron.core import parallel_state
+
+                        shard_model_grad = gate_wgrad.view(-1)[
+                            param_range.start : param_range.end
+                        ].float()
+                        dp_size = parallel_state.get_data_parallel_world_size(
+                            with_context_parallel=True
+                        )
+                        shard_model_grad = shard_model_grad / dp_size
+                        shard_main_param._run_torch_gate_model_param = model_param
+                        shard_main_param._run_torch_gate_param_range = param_range
+                        shard_main_param._run_torch_gate_manual_adamw = True
+                        model_param._run_torch_gate_fp32_wgrad = None
+                    else:
+                        shard_model_grad = model_grad.view(-1)[param_range.start : param_range.end]
                     if self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
                         # Pytorch requires a param and its' grad to be the same dtype, but we want
                         # their types to be different in precision-aware optimizer. So we use
@@ -2708,6 +2731,99 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         else:
             copy_group_grads(self.model_float16_groups, self.shard_fp32_from_float16_groups)
             copy_group_grads(self.model_fp32_groups, self.shard_fp32_groups)
+
+    def _capture_gate_manual_adamw_states(self):
+        self._run_torch_gate_adamw_captures = []
+        for group in self.optimizer.param_groups:
+            beta1, beta2 = group["betas"]
+            for param in group["params"]:
+                if not getattr(param, "_run_torch_gate_manual_adamw", False):
+                    continue
+                if param.grad is None:
+                    continue
+                state = self.optimizer.state.get(param, {})
+                step_pre = state.get("step", 0)
+                step_pre_value = (
+                    int(step_pre.detach().item())
+                    if isinstance(step_pre, torch.Tensor)
+                    else int(step_pre)
+                )
+                exp_avg = state.get("exp_avg")
+                exp_avg_sq = state.get("exp_avg_sq")
+                self._run_torch_gate_adamw_captures.append(
+                    {
+                        "param": param,
+                        "grad": param.grad.detach().to(torch.float32).clone(),
+                        "param_pre": param.detach().to(torch.float32).clone(),
+                        "exp_avg_pre": (
+                            exp_avg.detach().to(torch.float32).clone()
+                            if exp_avg is not None
+                            else torch.zeros_like(param, dtype=torch.float32)
+                        ),
+                        "exp_avg_sq_pre": (
+                            exp_avg_sq.detach().to(torch.float32).clone()
+                            if exp_avg_sq is not None
+                            else torch.zeros_like(param, dtype=torch.float32)
+                        ),
+                        "step_t": step_pre_value + 1,
+                        "lr": group["lr"],
+                        "beta1": beta1,
+                        "beta2": beta2,
+                        "eps": group["eps"],
+                        "weight_decay": group["weight_decay"],
+                    }
+                )
+
+    def _apply_gate_manual_adamw_states(self):
+        captures = getattr(self, "_run_torch_gate_adamw_captures", [])
+        for item in captures:
+            param = item["param"]
+            device = param.device
+            beta1 = item["beta1"]
+            beta2 = item["beta2"]
+            grad = item["grad"]
+            exp_avg = item["exp_avg_pre"]
+            exp_avg_sq = item["exp_avg_sq_pre"]
+            param_pre = item["param_pre"]
+            step_t = item["step_t"]
+
+            state = self.optimizer.state.setdefault(param, {})
+            original_grad = param.grad
+            with torch.no_grad():
+                param.copy_(param_pre)
+            param.grad = grad.to(dtype=param.dtype)
+            torch_optimizer = torch.optim.AdamW(
+                [param],
+                lr=float(item["lr"]),
+                betas=(float(beta1), float(beta2)),
+                eps=float(item["eps"]),
+                weight_decay=float(item["weight_decay"]),
+                fused=bool(param.is_cuda),
+            )
+            torch_state = torch_optimizer.state[param]
+            torch_state["step"] = torch.tensor(
+                float(step_t - 1), dtype=torch.float32, device=device
+            )
+            torch_state["exp_avg"] = exp_avg.to(dtype=param.dtype).clone()
+            torch_state["exp_avg_sq"] = exp_avg_sq.to(dtype=param.dtype).clone()
+            torch_optimizer.step()
+            param.grad = original_grad
+
+            if "exp_avg" in state:
+                state["exp_avg"].copy_(torch_state["exp_avg"])
+            else:
+                state["exp_avg"] = torch_state["exp_avg"].detach().clone()
+            if "exp_avg_sq" in state:
+                state["exp_avg_sq"].copy_(torch_state["exp_avg_sq"])
+            else:
+                state["exp_avg_sq"] = torch_state["exp_avg_sq"].detach().clone()
+            step_state = state.get("step")
+            if isinstance(step_state, torch.Tensor):
+                step_state.fill_(step_t)
+            else:
+                state["step"] = torch.tensor(float(step_t), dtype=torch.float32, device=device)
+            param._run_torch_gate_manual_adamw = False
+        self._run_torch_gate_adamw_captures = []
 
     def _copy_main_params_to_model_params(self):
         """
@@ -2785,6 +2901,17 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         continue
                     else:
                         shard_model_param.data.copy_(shard_main_param)
+                        gate_model_param = getattr(
+                            shard_main_param, "_run_torch_gate_model_param", None
+                        )
+                        gate_param_range = getattr(
+                            shard_main_param, "_run_torch_gate_param_range", None
+                        )
+                        if gate_model_param is model_param and gate_param_range is not None:
+                            target = model_param.data.view(-1)[
+                                gate_param_range.start : gate_param_range.end
+                            ]
+                            target.copy_(shard_main_param.detach().to(dtype=target.dtype))
 
         # Copy shard groups to model groups.
         copy_group_params(self.shard_fp32_from_float16_groups, self.model_float16_groups)

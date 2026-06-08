@@ -75,14 +75,28 @@ _LOSS_PATH_LOGGED = False
 
 
 def _load_fixed_batch_tokens(args):
-    """Load dumped numpy batch (tokens + labels) for cross-framework alignment.
-
-    Reads from the directory specified by LOAD_FIXED_DATA_PATH env var,
-    matching files produced by _dump_batch_data.
-    """
+    """Load an env-gated fixed training batch for cross-framework alignment."""
     global _FIXED_BATCH_TOKENS
 
     if _FIXED_BATCH_TOKENS is not None:
+        return _FIXED_BATCH_TOKENS
+
+    fixed_tokens_json = os.environ.get('DSV4_MEGATRON_FIXED_TOKENS')
+    if fixed_tokens_json:
+        with open(fixed_tokens_json, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+        tokens = payload['tokens'] if isinstance(payload, dict) else payload
+        tokens = [int(token) for token in tokens]
+
+        expected_token_count = args.seq_length + 1
+        if len(tokens) != expected_token_count:
+            raise ValueError(
+                f"DSV4_MEGATRON_FIXED_TOKENS expects {expected_token_count} tokens "
+                f"for seq_length={args.seq_length}, got {len(tokens)} from {fixed_tokens_json}"
+            )
+
+        _FIXED_BATCH_TOKENS = tokens
+        print_rank_0(f"[DSV4_MEGATRON_FIXED_TOKENS] using fixed token batch from {fixed_tokens_json}")
         return _FIXED_BATCH_TOKENS
 
     fixed_tokens_path = os.environ.get('LOAD_FIXED_DATA_PATH')
@@ -145,7 +159,7 @@ def _tensor_md5(tensor: torch.Tensor, dtype: torch.dtype | None = None) -> str:
 
 
 def _override_batch_with_fixed_tokens(batch, args):
-    """Replace dataloader output with a dumped numpy batch for cross-framework alignment."""
+    """Replace dataloader output with a deterministic fixed batch when requested."""
     global _FIXED_BATCH_LOGGED
 
     fixed_data = _load_fixed_batch_tokens(args)
@@ -153,14 +167,19 @@ def _override_batch_with_fixed_tokens(batch, args):
         return batch
 
     device = torch.cuda.current_device()
-    tokens_np, labels_np = fixed_data
-    tokens = torch.tensor(tokens_np, dtype=torch.long, device=device)
-    labels = torch.tensor(labels_np, dtype=torch.long, device=device)
+    if isinstance(fixed_data, tuple):
+        tokens_np, labels_np = fixed_data
+        tokens = torch.tensor(tokens_np, dtype=torch.long, device=device)
+        labels = torch.tensor(labels_np, dtype=torch.long, device=device)
+    else:
+        fixed = torch.tensor(fixed_data, dtype=torch.long, device=device)
+        tokens = fixed[:-1].unsqueeze(0).expand(args.micro_batch_size, -1).contiguous()
+        labels = fixed[1:].unsqueeze(0).expand(args.micro_batch_size, -1).contiguous()
     loss_mask = torch.ones(tokens.shape, dtype=torch.float32, device=device)
     position_ids = (
-        torch.arange(tokens.shape[1], dtype=torch.long, device=device)
+        torch.arange(args.seq_length, dtype=torch.long, device=device)
         .unsqueeze(0)
-        .expand(tokens.shape[0], -1)
+        .expand(args.micro_batch_size, -1)
         .contiguous()
     )
 
