@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-source /root/paddlejob/share-storage/gpfs/system-public/huangjiyi/dsv4-flash-workspace/Megatron-LM-CleanAlign/.venv/bin/activate
+source /root/paddlejob/share-storage/gpfs/system-public/huangjiyi/dsv4_backward_align_0612/Megatron-LM/.venv/bin/activate
 unset PYTHONPATH
 
 MASTER_PORT="6091"
